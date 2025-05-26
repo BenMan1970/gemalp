@@ -66,14 +66,31 @@ def smoothed_heiken_ashi_pine(dfo,l1=10,l2=10):
     eo=ema(dfo['Open'],l1);eh=ema(dfo['High'],l1);el=ema(dfo['Low'],l1);ec=ema(dfo['Close'],l1)
     hai=pd.DataFrame({'Open':eo,'High':eh,'Low':el,'Close':ec},index=dfo.index)
     hao_i,hac_i=heiken_ashi_pine(hai);sho=ema(hao_i,l2);shc=ema(hac_i,l2);return sho,shc
-def ichimoku_pine_signal(dh,dl,dc,tp=9,kp=26,sp=52):
-    mlr=max(tp,kp,sp)
-    if len(dh)<mlr or len(dl)<mlr or len(dc)<mlr:print(f"Ichi:Data<({len(dc)}) vs req {mlr}.");return 0
-    ts=(dh.rolling(window=tp).max()+dl.rolling(window=tp).min())/2;ks=(dh.rolling(window=kp).max()+dl.rolling(window=kp).min())/2
-    sa=(ts+ks)/2;sb=(dh.rolling(window=sp).max()+dl.rolling(window=sp).min())/2
-    if pd.isna(dc.iloc[-1]) or pd.isna(sa.iloc[-1]) or pd.isna(sb.iloc[-1]):print("Ichi:NaN close/spans.");return 0
-    ccl=dc.iloc[-1];cssa=sa.iloc[-1];cssb=sb.iloc[-1];ctn=max(cssa,cssb);cbn=min(cssa,cssb);sig=0
-    if ccl>ctn:sig=1;elif ccl<cbn:sig=-1;return sig
+
+# --- Fonction ichimoku_pine_signal (CORRIGÉE) ---
+def ichimoku_pine_signal(df_high, df_low, df_close, tenkan_p=9, kijun_p=26, senkou_b_p=52):
+    min_len_req = max(tenkan_p, kijun_p, senkou_b_p)
+    if len(df_high) < min_len_req or len(df_low) < min_len_req or len(df_close) < min_len_req:
+        print(f"Ichimoku: Données insuffisantes ({len(df_close)} barres) vs requis {min_len_req}.")
+        return 0 
+    tenkan_sen = (df_high.rolling(window=tenkan_p).max() + df_low.rolling(window=tenkan_p).min()) / 2
+    kijun_sen = (df_high.rolling(window=kijun_p).max() + df_low.rolling(window=kijun_p).min()) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    senkou_span_b = (df_high.rolling(window=senkou_b_p).max() + df_low.rolling(window=senkou_b_p).min()) / 2
+    if pd.isna(df_close.iloc[-1]) or pd.isna(senkou_span_a.iloc[-1]) or pd.isna(senkou_span_b.iloc[-1]):
+        print("Ichimoku: NaN détecté dans close ou spans pour la dernière bougie.")
+        return 0 
+    current_close = df_close.iloc[-1]
+    current_ssa = senkou_span_a.iloc[-1]
+    current_ssb = senkou_span_b.iloc[-1]
+    cloud_top_now = max(current_ssa, current_ssb)
+    cloud_bottom_now = min(current_ssa, current_ssb)
+    sig = 0 
+    if current_close > cloud_top_now:
+        sig = 1
+    elif current_close < cloud_bottom_now:
+        sig = -1
+    return sig
 
 @st.cache_data(ttl=300)
 def get_data_alpaca(symbol_alpaca: str, timeframe_str: str = "1H", limit_bars: int = 250):
@@ -84,34 +101,25 @@ def get_data_alpaca(symbol_alpaca: str, timeframe_str: str = "1H", limit_bars: i
         tf_obj = TIMEFRAME_MAP_ALPACA.get(timeframe_str)
         if tf_obj is None:
             st.error(f"TF '{timeframe_str}' non valide. Sym: {symbol_alpaca}. Valides: {list(TIMEFRAME_MAP_ALPACA.keys())}")
-            print(f"TF '{timeframe_str}' non valide. Sym: {symbol_alpaca}. Valides: {list(TIMEFRAME_MAP_ALPACA.keys())}")
-            return None
+            print(f"TF '{timeframe_str}' non valide. Sym: {symbol_alpaca}. Valides: {list(TIMEFRAME_MAP_ALPACA.keys())}"); return None
         print(f"Appel api.get_bars: sym={symbol_alpaca}, tf_obj={tf_obj}, limit={limit_bars+50}")
         bars_list_raw = api.get_bars(symbol_alpaca, tf_obj, limit=limit_bars+50)
         print(f"--- Inspection données brutes pour {symbol_alpaca} ---")
         print(f"Type de bars_list_raw: {type(bars_list_raw)}")
-        bars_df = None # Initialiser bars_df
+        bars_df = None 
         try:
             bars_df = bars_list_raw.df 
             print(f"DF bars_df créé. Index type: {type(bars_df.index)}, Cols: {bars_df.columns.tolist()}")
             if not bars_df.empty: print(f"Head de bars_df:\n{bars_df.head()}")
             else: print(f"bars_df est vide après .df pour {symbol_alpaca}.")
-        except KeyError as ke:
-            st.error(f"Erreur clé (symbole?) .df {symbol_alpaca}: {ke}")
-            print(f"Erreur clé .df {symbol_alpaca}: {ke}"); return None
-        except Exception as df_err:
-            st.error(f"Erreur .df {symbol_alpaca}: {df_err}")
-            print(f"Erreur .df {symbol_alpaca}: {df_err}"); return None
+        except KeyError as ke: st.error(f"Erreur clé (symbole?) .df {symbol_alpaca}: {ke}"); print(f"Erreur clé .df {symbol_alpaca}: {ke}"); return None
+        except Exception as df_err: st.error(f"Erreur .df {symbol_alpaca}: {df_err}"); print(f"Erreur .df {symbol_alpaca}: {df_err}"); return None
         print(f"--- Fin inspection {symbol_alpaca} ---")
-        if bars_df is None or bars_df.empty: # Vérifier après le try-except
-            st.warning(f"Données Alpaca vides pour {symbol_alpaca} (post .df).")
-            print(f"Données Alpaca vides pour {symbol_alpaca} (post .df)."); return None
+        if bars_df is None or bars_df.empty: st.warning(f"Données Alpaca vides pour {symbol_alpaca} (post .df)."); print(f"Données Alpaca vides pour {symbol_alpaca} (post .df)."); return None
         if isinstance(bars_df.index, pd.DatetimeIndex):
             if bars_df.index.tz is None: bars_df.index=bars_df.index.tz_localize('UTC'); print(f"Index {symbol_alpaca} localisé UTC.")
             else: bars_df.index=bars_df.index.tz_convert('UTC'); print(f"Index {symbol_alpaca} converti UTC.")
-        else:
-            st.error(f"Index DF {symbol_alpaca} non DatetimeIndex. Type: {type(bars_df.index)}")
-            print(f"Index DF {symbol_alpaca} non DatetimeIndex. Type: {type(bars_df.index)}"); return None 
+        else: st.error(f"Index DF {symbol_alpaca} non DatetimeIndex. Type: {type(bars_df.index)}"); print(f"Index DF {symbol_alpaca} non DatetimeIndex. Type: {type(bars_df.index)}"); return None 
         if len(bars_df)<100: st.warning(f"Données Alpaca<100 {symbol_alpaca} ({len(bars_df)})."); print(f"Données<100 {symbol_alpaca} ({len(bars_df)})."); return None
         bars_df.rename(columns={'open':'Open','high':'High','low':'Low','close':'Close','volume':'Volume'},inplace=True)
         pdf=bars_df.dropna(); print(f"Données {symbol_alpaca} OK. Retour {len(pdf)}l.\n--- Fin get_data {symbol_alpaca} ---\n"); return pdf
@@ -121,9 +129,7 @@ def get_data_alpaca(symbol_alpaca: str, timeframe_str: str = "1H", limit_bars: i
         if "not found" in str(api_e) or "does not exist" in str(api_e) or "not a tradable" in str(api_e): st.warning(f"Symbole {symbol_alpaca} non trouvé/tradable. Feed: {api.data_feed if api else 'N/A'}.")
         elif "forbidden" in str(api_e) or "subscription" in str(api_e): st.error(f"Accès interdit/souscription {symbol_alpaca}.")
         return None
-    except Exception as e:
-        st.error(f"Erreur inattendue get_data {symbol_alpaca} (TF:{timeframe_str}).")
-        st.exception(e);print(f"ERREUR INATTENDUE get_data {symbol_alpaca}(TF:{timeframe_str}):\n{traceback.format_exc()}\n---Fin get_data {symbol_alpaca}(Ex)---\n");return None
+    except Exception as e: st.error(f"Erreur inattendue get_data {symbol_alpaca} (TF:{timeframe_str})."); st.exception(e);print(f"ERREUR INATTENDUE get_data {symbol_alpaca}(TF:{timeframe_str}):\n{traceback.format_exc()}\n---Fin get_data {symbol_alpaca}(Ex)---\n");return None
 
 def calculate_all_signals_pine(data):
     if data is None or len(data)<60:print(f"calc_sig:Data None/courtes({len(data) if data is not None else 'None'}).");return None
@@ -163,9 +169,14 @@ def calculate_all_signals_pine(data):
     if bc>brc:di="HAUSSIER";elif brc>bc:di="BAISSIER";elif bc==brc and bc>0:di="CONFLIT"
     return{'confluence_P':cfv,'direction_P':di,'bull_P':bc,'bear_P':brc,'rsi_P':sd.get('RSI_val',"N/A"),'adx_P':sd.get('ADX_val',"N/A"),'signals_P':sd}
 
-def get_stars_pine(cfv):
-    if cfv==6:return"⭐⭐⭐⭐⭐⭐";elif cfv==5:return"⭐⭐⭐⭐⭐";elif cfv==4:return"⭐⭐⭐⭐";
-    elif cfv==3:return"⭐⭐⭐";elif cfv==2:return"⭐⭐";elif cfv==1:return"⭐";else:return"WAIT"
+def get_stars_pine(cfv): # Fonction corrigée
+    if cfv==6:return"⭐⭐⭐⭐⭐⭐"
+    elif cfv==5:return"⭐⭐⭐⭐⭐"
+    elif cfv==4:return"⭐⭐⭐⭐"
+    elif cfv==3:return"⭐⭐⭐"
+    elif cfv==2:return"⭐⭐"
+    elif cfv==1:return"⭐"
+    else:return"WAIT"
 
 col1,col2=st.columns([1,3])
 with col1:
@@ -205,4 +216,3 @@ with col2:
 with st.expander("ℹ️ Comment ça marche (Logique Pine Script avec Données Alpaca)"):
     st.markdown("""**6 Signaux Confluence:** HMA(20),RSI(10),ADX(14)>=20,HA(Simple),SHA(10,10),Ichi(9,26,52).**Comptage & Étoiles:**Pine.**Source:**Alpaca API.""")
 st.caption("Scanner H1 (Alpaca). Multi-TF non actif.")
-    
