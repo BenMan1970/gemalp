@@ -6,7 +6,7 @@ import time
 
 # Import pour Alpaca
 import alpaca_trade_api as tradeapi
-from alpaca_trade_api.rest import TimeFrame 
+from alpaca_trade_api.rest import TimeFrame # TimeFrame est une Enum
 
 # --- Configuration de la page et titre ---
 st.set_page_config(page_title="Scanner Confluence Forex (Alpaca)", page_icon="⭐", layout="wide")
@@ -17,19 +17,18 @@ st.markdown("*Utilisation de l'API Alpaca pour les données de marché*")
 try:
     API_KEY = st.secrets["ALPACA_API_KEY"]
     API_SECRET = st.secrets["ALPACA_SECRET_KEY"]
-    # Utiliser l'URL de paper trading par défaut si non spécifié dans les secrets, sinon celui des secrets
     BASE_URL = st.secrets.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets") 
 except KeyError as e:
     st.error(f"Erreur: La clé secrète Streamlit '{e.args[0]}' n'est pas définie. Veuillez configurer vos secrets Alpaca.")
     st.stop()
-except Exception as e: # Intercepter d'autres erreurs potentielles liées aux secrets
+except Exception as e: 
     st.error(f"Une erreur s'est produite lors de la lecture des secrets Streamlit: {e}")
     st.stop()
 
 # Initialiser l'API Alpaca
+api = None # Déclarer api ici pour qu'il soit dans le scope global du module
 try:
     api = tradeapi.REST(API_KEY, API_SECRET, base_url=BASE_URL)
-    # Vérifier la connexion en essayant d'obtenir les informations du compte
     account = api.get_account()
     st.sidebar.success(f"Connecté au compte Alpaca (Paper): {account.account_number}")
 except Exception as e:
@@ -38,49 +37,50 @@ except Exception as e:
     st.stop()
 
 # --- Liste des paires Forex (Format Alpaca) ---
-# IMPORTANT: Vérifie les symboles exacts disponibles sur Alpaca.
-# Souvent 'EURUSD' (sans '/') pour le Forex. Pour XAUUSD, cela dépend si Alpaca le propose en spot ou CFD.
 FOREX_PAIRS_ALPACA = [
     'EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF',
     'AUDUSD', 'USDCAD', 'NZDUSD', 'EURJPY',
     'GBPJPY', 'EURGBP'
-    # 'XAUUSD' # Exemple pour l'or, à vérifier sur Alpaca. Peut nécessiter un compte spécifique ou être un CFD.
+    # 'XAUUSD' # Tu peux ajouter l'or si tu confirmes son symbole sur Alpaca
 ]
 
-# --- Fonctions d'indicateurs techniques (TES FONCTIONS RESTENT INCHANGÉES) ---
+# --- Mapping pour les Timeframes Alpaca ---
+# Utilisé pour convertir une chaîne (hashable) en objet TimeFrame (potentiellement non hashable comme arg direct de @st.cache_data)
+TIMEFRAME_MAP_ALPACA = {
+    "1Min": TimeFrame.Minute,
+    "5Min": TimeFrame(5, tradeapi.rest.TimeFrameUnit.Minute), # Exemple pour 5 minutes
+    "15Min": TimeFrame(15, tradeapi.rest.TimeFrameUnit.Minute),
+    "1H": TimeFrame.Hour,
+    "4H": TimeFrame(4, tradeapi.rest.TimeFrameUnit.Hour), # Exemple pour 4 heures
+    "1D": TimeFrame.Day
+}
+
+# --- Fonctions d'indicateurs techniques (INCHANGÉES) ---
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 def rma(series, period):
     return series.ewm(alpha=1/period, adjust=False).mean()
 def hull_ma_pine(data_close, period=20):
-    half_length = int(period / 2)
-    sqrt_length = int(np.sqrt(period))
+    half_length = int(period / 2); sqrt_length = int(np.sqrt(period))
     wma_half_period = data_close.rolling(window=half_length).apply(lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)), raw=True)
     wma_full_period = data_close.rolling(window=period).apply(lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)), raw=True)
     diff_wma = 2 * wma_half_period - wma_full_period
     hma_series = diff_wma.rolling(window=sqrt_length).apply(lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)), raw=True)
     return hma_series
 def rsi_pine(prices_ohlc4, period=10):
-    deltas = prices_ohlc4.diff()
-    gains = deltas.where(deltas > 0, 0.0)
-    losses = -deltas.where(deltas < 0, 0.0)
-    avg_gains = rma(gains, period)
-    avg_losses = rma(losses, period)
-    rs = avg_gains / avg_losses.replace(0, 1e-9)
-    rsi = 100 - (100 / (1 + rs))
+    deltas = prices_ohlc4.diff(); gains = deltas.where(deltas > 0, 0.0); losses = -deltas.where(deltas < 0, 0.0)
+    avg_gains = rma(gains, period); avg_losses = rma(losses, period)
+    rs = avg_gains / avg_losses.replace(0, 1e-9); rsi = 100 - (100 / (1 + rs))
     return rsi.fillna(50)
 def adx_pine(high, low, close, period=14):
     tr1 = high - low; tr2 = abs(high - close.shift(1)); tr3 = abs(low - close.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = rma(tr, period)
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1); atr = rma(tr, period)
     up_move = high.diff(); down_move = low.shift(1) - low
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=high.index)
     minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=high.index)
     safe_atr = atr.replace(0, 1e-9)
-    plus_di = 100 * (rma(plus_dm, period) / safe_atr)
-    minus_di = 100 * (rma(minus_dm, period) / safe_atr)
-    dx_denominator = (plus_di + minus_di).replace(0, 1e-9)
-    dx = 100 * (abs(plus_di - minus_di) / dx_denominator)
+    plus_di = 100 * (rma(plus_dm, period) / safe_atr); minus_di = 100 * (rma(minus_dm, period) / safe_atr)
+    dx_denominator = (plus_di + minus_di).replace(0, 1e-9); dx = 100 * (abs(plus_di - minus_di) / dx_denominator)
     adx_series = rma(dx, period)
     return adx_series.fillna(0)
 def heiken_ashi_pine(df_ohlc):
@@ -102,61 +102,47 @@ def ichimoku_pine_signal(df_high, df_low, df_close, tenkan_p=9, kijun_p=26, senk
     kijun_sen = (df_high.rolling(window=kijun_p).max() + df_low.rolling(window=kijun_p).min()) / 2
     senkou_span_a = (tenkan_sen + kijun_sen) / 2; senkou_span_b = (df_high.rolling(window=senkou_b_p).max() + df_low.rolling(window=senkou_b_p).min()) / 2
     current_close = df_close.iloc[-1]; current_ssa = senkou_span_a.iloc[-1]; current_ssb = senkou_span_b.iloc[-1]
-    if pd.isna(current_ssa) or pd.isna(current_ssb) or pd.isna(current_close): return 0
+    if pd.isna(current_ssa) or pd.isna(current_ssb) or pd.isna(current_close): return 0 # Indeterminate
     cloud_top_now = max(current_ssa, current_ssb); cloud_bottom_now = min(current_ssa, current_ssb)
     signal = 0
     if current_close > cloud_top_now: signal = 1
     elif current_close < cloud_bottom_now: signal = -1
     return signal
 
-# --- Fonction get_data utilisant Alpaca ---
-@st.cache_data(ttl=300)
-def get_data_alpaca(symbol_alpaca, timeframe_api=TimeFrame.Hour, limit_bars=250): # H1 par défaut
+# --- Fonction get_data utilisant Alpaca (MODIFIÉE pour timeframe_str) ---
+@st.cache_data(ttl=300) # Cache pour 5 minutes
+def get_data_alpaca(symbol_alpaca: str, timeframe_str: str = "1H", limit_bars: int = 250):
+    global api # S'assurer qu'on utilise l'instance 'api' initialisée globalement
+    if api is None: # Sécurité si l'api n'a pas pu être initialisée
+        st.error("L'objet API Alpaca n'est pas initialisé.")
+        return None
+        
     try:
-        # Alpaca a une limite sur le nombre de barres par requête (ex: 1000 pour les données gratuites IEX)
-        # La date de début est moins critique si on spécifie 'limit', mais on peut la calculer pour être précis
-        # Pour cet exemple, on va prendre une période glissante pour s'assurer d'avoir assez de données
-        end_date_iso = pd.Timestamp.now(tz='UTC').isoformat() # Fin = maintenant (UTC)
-        # Start date: Reculer suffisamment pour avoir au moins 'limit_bars'
-        # Pour H1, 250 barres = ~10-11 jours. 
-        # Alpaca pourrait avoir besoin de 'America/New_York' pour le timestamp si les données sont alignées sur le marché US
-        # Cependant, pour les barres Forex, UTC est souvent plus simple.
-        
-        # L'API get_bars est plus simple si on utilise les arguments start/end
-        # Mais pour juste avoir les N dernières barres, une requête avec 'limit' est bonne.
-        # Cependant, pour être plus robuste avec les dates, calculons un start.
-        # Alpaca v2 API: api.get_bars prend start, end, timeframe, limit, etc.
-        # Note: Pour le Forex, les données peuvent provenir de différents fournisseurs (ex: FXCM via Alpaca).
-        # Il est bon de vérifier la documentation Alpaca pour 'feed' et 'source' pour Forex.
-        # Pour cet exemple, on utilise le comportement par défaut.
-
-        bars_df = api.get_bars(
-            symbol_alpaca, # Ex: 'EURUSD'
-            timeframe_api, # Ex: TimeFrame.Hour
-            limit=limit_bars + 50 # Demander un peu plus pour avoir une marge pour les calculs
-                                 # et les éventuelles barres partielles non retournées
-        ).df
-        
-        # Vérifier que l'index est bien en UTC si ce n'est pas déjà le cas
-        if bars_df.index.tz is None:
-            bars_df.index = bars_df.index.tz_localize('UTC')
-        else:
-            bars_df.index = bars_df.index.tz_convert('UTC')
-
-
-        if bars_df.empty or len(bars_df) < 100: # Seuil minimal après récupération
-            print(f"Données Alpaca insuffisantes ou vides pour {symbol_alpaca} ({len(bars_df)} barres).")
+        # Convertir la chaîne timeframe_str en objet TimeFrame Alpaca
+        alpaca_timeframe_object = TIMEFRAME_MAP_ALPACA.get(timeframe_str)
+        if alpaca_timeframe_object is None:
+            st.error(f"Chaîne de timeframe '{timeframe_str}' non valide pour Alpaca. Valeurs valides: {list(TIMEFRAME_MAP_ALPACA.keys())}")
             return None
 
-        # Renommer les colonnes pour correspondre à ce que tes fonctions attendent
-        bars_df.rename(columns={
-            'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
-        }, inplace=True)
+        bars_df = api.get_bars(
+            symbol_alpaca,
+            alpaca_timeframe_object, # Utilise l'objet TimeFrame converti
+            limit=limit_bars + 50 # Demander un peu plus pour marge et calculs
+        ).df
         
-        return bars_df.dropna() # Supprimer les lignes avec NaN
+        if bars_df.index.tz is None: bars_df.index = bars_df.index.tz_localize('UTC')
+        else: bars_df.index = bars_df.index.tz_convert('UTC')
+
+        if bars_df.empty or len(bars_df) < 100:
+            print(f"Données Alpaca insuffisantes/vides pour {symbol_alpaca} ({len(bars_df)} barres).")
+            return None
+
+        bars_df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+        return bars_df.dropna()
 
     except tradeapi.rest.APIError as api_err:
-        print(f"Erreur API Alpaca pour {symbol_alpaca}: {api_err}")
+        print(f"Erreur API Alpaca pour {symbol_alpaca} (timeframe {timeframe_str}): {api_err}")
+        # Afficher des messages plus spécifiques à l'utilisateur dans l'UI
         if "not found for symbol" in str(api_err) or "does not exist" in str(api_err) or "not a tradable asset" in str(api_err):
             st.warning(f"Symbole {symbol_alpaca} non trouvé ou non tradable sur Alpaca (Feed: {api.data_feed}). Vérifiez le format du symbole.")
         elif "forbidden" in str(api_err) or "subscription" in str(api_err):
@@ -165,19 +151,18 @@ def get_data_alpaca(symbol_alpaca, timeframe_api=TimeFrame.Hour, limit_bars=250)
             st.error(f"Erreur API Alpaca non gérée pour {symbol_alpaca}: {api_err}")
         return None
     except Exception as e:
-        print(f"Erreur générale lors de la récupération des données Alpaca pour {symbol_alpaca}: {str(e)}")
+        print(f"Erreur générale lors de la récupération des données Alpaca pour {symbol_alpaca} (timeframe {timeframe_str}): {str(e)}")
         return None
-
 
 # --- Fonctions calculate_all_signals_pine et get_stars_pine (INCHANGÉES) ---
 def calculate_all_signals_pine(data):
     if data is None or len(data) < 60: return None
     required_cols = ['Open', 'High', 'Low', 'Close']
-    if not all(col in data.columns for col in required_cols): print(f"Colonnes manquantes: {required_cols}"); return None
+    if not all(col in data.columns for col in required_cols): print(f"Colonnes OHLC manquantes pour un symbole."); return None
     close = data['Close']; high = data['High']; low = data['Low']; open_price = data['Open']
     ohlc4 = (open_price + high + low + close) / 4
     bull_confluences = 0; bear_confluences = 0; signal_details_pine = {}
-    try:
+    try: # HMA
         hma_series = hull_ma_pine(close, 20)
         if len(hma_series) >= 2 and not hma_series.iloc[-2:].isna().any():
             hma_val = hma_series.iloc[-1]; hma_prev = hma_series.iloc[-2]
@@ -186,7 +171,7 @@ def calculate_all_signals_pine(data):
             else: signal_details_pine['HMA'] = "─"
         else: signal_details_pine['HMA'] = "N/A"
     except Exception as e: signal_details_pine['HMA'] = f"Err({type(e).__name__})"
-    try:
+    try: # RSI
         rsi_series = rsi_pine(ohlc4, 10)
         if len(rsi_series) >=1 and not pd.isna(rsi_series.iloc[-1]):
             rsi_val = rsi_series.iloc[-1]; signal_details_pine['RSI_val'] = f"{rsi_val:.0f}"
@@ -195,7 +180,7 @@ def calculate_all_signals_pine(data):
             else: signal_details_pine['RSI'] = f"─({rsi_val:.0f})"
         else: signal_details_pine['RSI'] = "N/A"
     except Exception as e: signal_details_pine['RSI'] = f"Err({type(e).__name__})"; signal_details_pine['RSI_val'] = "N/A"
-    try:
+    try: # ADX
         adx_series = adx_pine(high, low, close, 14)
         if len(adx_series) >= 1 and not pd.isna(adx_series.iloc[-1]):
             adx_val = adx_series.iloc[-1]; signal_details_pine['ADX_val'] = f"{adx_val:.0f}"
@@ -203,7 +188,7 @@ def calculate_all_signals_pine(data):
             else: signal_details_pine['ADX'] = f"✖({adx_val:.0f})"
         else: signal_details_pine['ADX'] = "N/A"
     except Exception as e: signal_details_pine['ADX'] = f"Err({type(e).__name__})"; signal_details_pine['ADX_val'] = "N/A"
-    try:
+    try: # HA
         ha_open, ha_close = heiken_ashi_pine(data)
         if len(ha_open) >=1 and len(ha_close) >=1 and not pd.isna(ha_open.iloc[-1]) and not pd.isna(ha_close.iloc[-1]):
             if ha_close.iloc[-1] > ha_open.iloc[-1]: bull_confluences += 1; signal_details_pine['HA'] = "▲"
@@ -211,7 +196,7 @@ def calculate_all_signals_pine(data):
             else: signal_details_pine['HA'] = "─"
         else: signal_details_pine['HA'] = "N/A"
     except Exception as e: signal_details_pine['HA'] = f"Err({type(e).__name__})"
-    try:
+    try: # SHA
         sha_open, sha_close = smoothed_heiken_ashi_pine(data, len1=10, len2=10)
         if len(sha_open) >=1 and len(sha_close) >=1 and not pd.isna(sha_open.iloc[-1]) and not pd.isna(sha_close.iloc[-1]):
             if sha_close.iloc[-1] > sha_open.iloc[-1]: bull_confluences += 1; signal_details_pine['SHA'] = "▲"
@@ -219,13 +204,13 @@ def calculate_all_signals_pine(data):
             else: signal_details_pine['SHA'] = "─"
         else: signal_details_pine['SHA'] = "N/A"
     except Exception as e: signal_details_pine['SHA'] = f"Err({type(e).__name__})"
-    try:
-        if len(high) >= 52:
+    try: # Ichi
+        if len(high) >= 52 and len(low) >=52 and len(close) >=52 : # Assurer assez de données
             ichi_signal = ichimoku_pine_signal(high, low, close)
             if ichi_signal == 1: bull_confluences += 1; signal_details_pine['Ichi'] = "▲"
             elif ichi_signal == -1: bear_confluences += 1; signal_details_pine['Ichi'] = "▼"
             else: signal_details_pine['Ichi'] = "─"
-        else: signal_details_pine['Ichi'] = "N/D"
+        else: signal_details_pine['Ichi'] = "N/D" # Pas assez de données
     except Exception as e: signal_details_pine['Ichi'] = f"Err({type(e).__name__})"
     confluence_value = max(bull_confluences, bear_confluences)
     direction = "NEUTRE"
@@ -263,16 +248,17 @@ with col2:
         for i, symbol_to_scan in enumerate(FOREX_PAIRS_ALPACA):
             current_progress = (i + 1) / len(FOREX_PAIRS_ALPACA)
             progress_bar.progress(current_progress)
-            pair_name_display = symbol_to_scan.replace('/', '') # Pour affichage sans '/'
+            pair_name_display = symbol_to_scan # Alpaca symboles sont déjà assez lisibles
             status_text.text(f"Analyse (Alpaca H1): {pair_name_display} ({i+1}/{len(FOREX_PAIRS_ALPACA)})")
             
-            data_h1_alpaca = get_data_alpaca(symbol_to_scan, timeframe_api=TimeFrame.Hour, limit_bars=250)
+            # Appel MODIFIÉ à get_data_alpaca avec timeframe_str
+            data_h1_alpaca = get_data_alpaca(symbol_to_scan, timeframe_str="1H", limit_bars=250) # H1 par défaut
             
-            # ---- AJOUT POUR DÉBOGAGE ----
-            if data_h1_alpaca is not None and (symbol_to_scan == 'GBPUSD' or symbol_to_scan == 'AUDUSD'): # Cible spécifique
-                st.write(f"--- Données OHLC pour {pair_name_display} (5 dernières barres d'Alpaca) ---")
-                st.dataframe(data_h1_alpaca[['Open', 'High', 'Low', 'Close']].tail(5))
-            # ---- FIN DE L'AJOUT ----
+            # ---- DÉBOGAGE OHLC (Optionnel, décommente si besoin) ----
+            # if data_h1_alpaca is not None and (symbol_to_scan == 'GBPUSD' or symbol_to_scan == 'AUDUSD'):
+            #     st.write(f"--- Données OHLC pour {pair_name_display} (5 dernières barres d'Alpaca) ---")
+            #     st.dataframe(data_h1_alpaca[['Open', 'High', 'Low', 'Close']].tail(5))
+            # ---- FIN DÉBOGAGE ----
 
             if data_h1_alpaca is not None:
                 signals = calculate_all_signals_pine(data_h1_alpaca)
@@ -284,33 +270,45 @@ with col2:
                                    'Bull': signals['bull_P'], 'Bear': signals['bear_P'],
                                    'details': signals['signals_P']}
                     processed_results.append(result_data)
-                else: processed_results.append({'Paire': pair_name_display, 'Direction': 'ERREUR CALCUL', 'Conf. (0-6)':0, 'Étoiles':'N/A', 'RSI':'N/A', 'ADX':'N/A', 'Bull':0, 'Bear':0, 'details':{'Info': 'Calcul signaux Alpaca échoué'}})
-            else: processed_results.append({'Paire': pair_name_display, 'Direction': 'ERREUR DONNÉES ALPACA', 'Conf. (0-6)':0, 'Étoiles':'N/A', 'RSI':'N/A', 'ADX':'N/A', 'Bull':0, 'Bear':0, 'details':{'Info': 'Données Alpaca non dispo/symbole invalide'}})
-            time.sleep(0.2) # Augmenter légèrement pour être gentil avec l'API Alpaca
+                else: 
+                    processed_results.append({'Paire': pair_name_display, 'Direction': 'ERREUR CALCUL', 'Conf. (0-6)':0, 
+                                              'Étoiles':'N/A', 'RSI':'N/A', 'ADX':'N/A', 'Bull':0, 'Bear':0, 
+                                              'details':{'Info': 'Calcul des signaux (Alpaca) a échoué'}})
+            else: 
+                # Le message d'erreur spécifique de get_data_alpaca (st.warning/st.error) aura déjà été affiché si besoin
+                processed_results.append({'Paire': pair_name_display, 'Direction': 'ERREUR DONNÉES', 'Conf. (0-6)':0, 
+                                          'Étoiles':'N/A', 'RSI':'N/A', 'ADX':'N/A', 'Bull':0, 'Bear':0, 
+                                          'details':{'Info': 'Données Alpaca non disponibles ou symbole invalide'}})
+            time.sleep(0.2) # Pour éviter de surcharger l'API Alpaca
 
         progress_bar.empty(); status_text.empty()
 
         if processed_results:
             df_all = pd.DataFrame(processed_results)
-            df_display = df_all[df_all['Conf. (0-6)'] >= min_confluence_filter].copy() if not show_all_pairs else df_all.copy()
-            if not show_all_pairs: st.success(f"🎯 {len(df_display)} paire(s) avec {min_confluence_filter}+ de confluence (Alpaca).")
-            else: st.info(f"🔍 Affichage des {len(df_display)} paires analysées (Alpaca).")
+            if not show_all_pairs:
+                df_display = df_all[df_all['Conf. (0-6)'] >= min_confluence_filter].copy()
+                st.success(f"🎯 {len(df_display)} paire(s) avec {min_confluence_filter}+ de confluence trouvée(s) (Données Alpaca).")
+            else:
+                df_display = df_all.copy()
+                st.info(f"🔍 Affichage des {len(df_display)} paires analysées (Données Alpaca).")
             
             if not df_display.empty:
                 df_display_sorted = df_display.sort_values('Conf. (0-6)', ascending=False)
                 cols_to_show_in_df = ['Paire', 'Direction', 'Conf. (0-6)', 'Étoiles', 'RSI', 'ADX', 'Bull', 'Bear']
                 st.dataframe(df_display_sorted[cols_to_show_in_df], use_container_width=True, hide_index=True)
-                with st.expander("📊 Détails des signaux (Alpaca)"):
+                with st.expander("📊 Détails des signaux (Données Alpaca)"):
                     for _, row in df_display_sorted.iterrows():
-                        st.write(f"**{row['Paire']}** - {row['Étoiles']} ({row['Conf. (0-6)']}) - {row['Direction']}")
+                        st.write(f"**{row['Paire']}** - {row['Étoiles']} (Confluence: {row['Conf. (0-6)']}) - Direction: {row['Direction']}")
                         detail_cols = st.columns(6)
                         sig_map_details = row['details']
                         pine_signals_order_for_details = ['HMA', 'RSI', 'ADX', 'HA', 'SHA', 'Ichi']
                         for idx, sig_key in enumerate(pine_signals_order_for_details):
                             detail_cols[idx].metric(label=sig_key, value=sig_map_details.get(sig_key, "N/P"))
                         st.divider()
-            else: st.warning(f"❌ Aucune paire avec critères de filtrage (Alpaca). Vérifiez si des erreurs de symbole ou de données sont survenues.")
-        else: st.error("❌ Aucune paire traitée (Alpaca).")
+            else: 
+                st.warning(f"❌ Aucune paire ne correspond à vos critères de filtrage (min confluence: {min_confluence_filter}). Vérifiez les logs et les messages d'erreur pour des problèmes de données ou de symbole.")
+        else: 
+            st.error("❌ Aucune paire n'a pu être traitée. Vérifiez les logs de la console Streamlit Cloud pour des erreurs détaillées.")
 
 # --- Section d'information ---
 with st.expander("ℹ️ Comment ça marche (Logique Pine Script avec Données Alpaca)"):
@@ -321,4 +319,4 @@ with st.expander("ℹ️ Comment ça marche (Logique Pine Script avec Données A
     **Comptage & Étoiles (Logique Pine):** Confluence Finale = max(bull, bear). Étoiles basées sur score 0-6.
     **Source des Données:** Marchés Alpaca (via API).
     """)
-st.caption("Scanner H1 (Données Alpaca). Multi-TF non actif.")
+st.caption("Scanner H1 (Données Alpaca). Les filtres Multi-TF (D1/H4) ne sont pas actifs dans cette version.")
