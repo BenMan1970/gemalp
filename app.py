@@ -41,7 +41,6 @@ FOREX_PAIRS_ALPACA = [
     'EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF',
     'AUDUSD', 'USDCAD', 'NZDUSD', 'EURJPY',
     'GBPJPY', 'EURGBP'
-    # 'XAUUSD' 
 ]
 
 # --- Mapping pour les Timeframes Alpaca ---
@@ -111,7 +110,6 @@ def get_data_alpaca(symbol_alpaca: str, timeframe_str: str = "1H", limit_bars: i
         st.error("FATAL: API Alpaca non initialisée (get_data_alpaca).")
         print("FATAL: API Alpaca non initialisée (get_data_alpaca).")
         return None
-        
     print(f"\n--- Début get_data_alpaca pour: symbol='{symbol_alpaca}', timeframe='{timeframe_str}', limit={limit_bars} ---")
     try:
         alpaca_timeframe_object = TIMEFRAME_MAP_ALPACA.get(timeframe_str)
@@ -119,58 +117,60 @@ def get_data_alpaca(symbol_alpaca: str, timeframe_str: str = "1H", limit_bars: i
             st.error(f"TF '{timeframe_str}' non valide. Sym: {symbol_alpaca}. Valides: {list(TIMEFRAME_MAP_ALPACA.keys())}")
             print(f"TF '{timeframe_str}' non valide. Sym: {symbol_alpaca}. Valides: {list(TIMEFRAME_MAP_ALPACA.keys())}")
             return None
-
         print(f"Appel api.get_bars: sym={symbol_alpaca}, tf_obj={alpaca_timeframe_object}, limit={limit_bars + 50}")
         bars_list_raw = api.get_bars(symbol_alpaca, alpaca_timeframe_object, limit=limit_bars + 50)
-        
         print(f"--- Inspection données brutes pour {symbol_alpaca} ---")
         print(f"Type de bars_list_raw: {type(bars_list_raw)}")
         raw_data_len = 0
-        if hasattr(bars_list_raw, '__len__'): raw_data_len = len(bars_list_raw)
-        print(f"Nombre d'objets Bar bruts reçus: {raw_data_len}")
-        if raw_data_len > 0:
-            try:
-                # L'objet retourné par get_bars est un objet BarSet qui contient les données dans un dictionnaire par symbole
-                # Si on demande un seul symbole, on peut accéder directement ou via la clé du symbole
-                first_bar_data_dict = bars_list_raw[symbol_alpaca] if isinstance(bars_list_raw, dict) and symbol_alpaca in bars_list_raw else bars_list_raw # Fallback
-                if hasattr(first_bar_data_dict, '__len__') and len(first_bar_data_dict) > 0 :
-                    print(f"Premier objet Bar (via dict/liste): {first_bar_data_dict[0]}")
-                    print(f"Attributs du premier Bar: {vars(first_bar_data_dict[0])}")
-                else:
-                    print("Impossible d'accéder au premier objet Bar via dict/liste, ou la liste est vide.")
-            except Exception as inspect_err:
-                print(f"Erreur inspection premier Bar: {inspect_err}")
+        if hasattr(bars_list_raw, '__len__'): raw_data_len = len(bars_list_raw) # Pour BarSet, len donne le nombre de symboles
+        # Si bars_list_raw est un BarSet, il faut accéder aux barres via la clé du symbole
+        actual_bars_for_symbol = []
+        if isinstance(bars_list_raw, tradeapi.rest.BarSet): # ou type(bars_list_raw).__name__ == 'BarSet'
+            if symbol_alpaca in bars_list_raw:
+                actual_bars_for_symbol = bars_list_raw[symbol_alpaca]
+                print(f"Nombre d'objets Bar réels pour {symbol_alpaca} dans BarSet: {len(actual_bars_for_symbol)}")
+                if len(actual_bars_for_symbol) > 0:
+                    print(f"Premier objet Bar réel: {actual_bars_for_symbol[0]}")
+                    print(f"Attributs du premier Bar réel: {vars(actual_bars_for_symbol[0])}")
+            else:
+                print(f"Symbole {symbol_alpaca} non trouvé dans le BarSet retourné.")
+        else: # Si ce n'est pas un BarSet, peut-être une liste directe (moins probable pour get_bars)
+            actual_bars_for_symbol = bars_list_raw 
+            if hasattr(actual_bars_for_symbol, '__len__') and len(actual_bars_for_symbol) > 0:
+                 print(f"Premier objet Bar (liste directe): {actual_bars_for_symbol[0]}")
+                 print(f"Attributs du premier Bar (liste directe): {vars(actual_bars_for_symbol[0])}")
+            else:
+                 print(f"bars_list_raw n'est pas un BarSet et la liste est vide ou n'a pas de longueur.")
 
-        # Conversion en DataFrame
         bars_df = bars_list_raw.df
         print(f"DataFrame bars_df créé. Index type: {type(bars_df.index)}, Colonnes: {bars_df.columns.tolist()}")
         if not bars_df.empty: print(f"Head de bars_df:\n{bars_df.head()}")
+        else: print(f"bars_df est vide après .df pour {symbol_alpaca}")
         print(f"--- Fin inspection données brutes {symbol_alpaca} ---")
         
         if bars_df.empty:
+            # Ce message apparaîtra si .df est vide, même si bars_list_raw contenait des barres pour d'autres symboles (non applicable ici)
+            # Ou si actual_bars_for_symbol était vide.
             st.warning(f"Données Alpaca vides pour {symbol_alpaca} après conversion en DataFrame.")
             print(f"Données Alpaca vides pour {symbol_alpaca} après .df.")
             return None
 
-        # Gestion du fuseau horaire (avec la correction isinstance)
         if isinstance(bars_df.index, pd.DatetimeIndex):
             if bars_df.index.tz is None: bars_df.index = bars_df.index.tz_localize('UTC'); print(f"Index pour {symbol_alpaca} localisé UTC.")
             else: bars_df.index = bars_df.index.tz_convert('UTC'); print(f"Index pour {symbol_alpaca} converti UTC.")
         else:
             st.error(f"Index DF pour {symbol_alpaca} non DatetimeIndex. Type: {type(bars_df.index)}")
             print(f"Index DF pour {symbol_alpaca} non DatetimeIndex. Type: {type(bars_df.index)}")
-            return None # Ne peut pas continuer si l'index n'est pas temporel
+            return None 
 
-        if len(bars_df) < 100: # Seuil après vérification de l'index
+        if len(bars_df) < 100: 
             st.warning(f"Données Alpaca insuffisantes pour {symbol_alpaca} ({len(bars_df)} barres). Requis: 100.")
             print(f"Données Alpaca insuffisantes pour {symbol_alpaca} ({len(bars_df)} barres). Requis: 100.")
             return None
-
         bars_df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
         processed_df = bars_df.dropna()
         print(f"Données pour {symbol_alpaca} OK. Retour de {len(processed_df)} lignes après dropna.\n--- Fin get_data_alpaca pour {symbol_alpaca} ---\n")
         return processed_df
-
     except tradeapi.rest.APIError as api_err:
         st.error(f"Erreur API Alpaca pour {symbol_alpaca} (TF: {timeframe_str}): {api_err}")
         print(f"ERREUR API ALPACA pour {symbol_alpaca} (TF: {timeframe_str}):\n{str(api_err)}\n--- Fin get_data_alpaca pour {symbol_alpaca} (APIError) ---\n")
@@ -179,16 +179,14 @@ def get_data_alpaca(symbol_alpaca: str, timeframe_str: str = "1H", limit_bars: i
         elif "forbidden" in str(api_err) or "subscription" in str(api_err):
              st.error(f"Accès interdit/souscription pour {symbol_alpaca} sur Alpaca.")
         return None
-        
     except Exception as e:
         st.error(f"Erreur inattendue get_data_alpaca pour {symbol_alpaca} (TF: {timeframe_str}).")
         st.exception(e) 
         print(f"ERREUR INATTENDUE get_data_alpaca pour {symbol_alpaca} (TF: {timeframe_str}):\n{traceback.format_exc()}\n--- Fin get_data_alpaca pour {symbol_alpaca} (Exception) ---\n")
         return None
 
-# --- Fonctions calculate_all_signals_pine et get_stars_pine (INCHANGÉES) ---
+# --- Fonctions calculate_all_signals_pine (INCHANGÉE) ---
 def calculate_all_signals_pine(data):
-    # ... (code de calculate_all_signals_pine, identique à la version précédente avec les print d'erreur)
     if data is None or len(data) < 60: print(f"calc_signals: Données None/courtes ({len(data) if data is not None else 'None'})."); return None
     req_cols=['Open','High','Low','Close']; 
     if not all(c in data.columns for c in req_cols): print("calc_signals: Cols OHLC manquantes."); return None
@@ -240,7 +238,6 @@ def calculate_all_signals_pine(data):
         ichi_s=ichimoku_pine_signal(high,low,close)
         if ichi_s==1: bull_c+=1;sig_det['Ichi']="▲"
         elif ichi_s==-1: bear_c+=1;sig_det['Ichi']="▼"
-        # Correction pour la condition N/D d'Ichimoku
         elif ichi_s==0 and (len(data) < max(9,26,52) or pd.isna(data['Close'].iloc[-1])): sig_det['Ichi']="N/D"
         else: sig_det['Ichi']="─"
     except Exception as e: sig_det['Ichi']=f"ErrIchi";print(f"Err Ichi:{e}")
@@ -252,10 +249,15 @@ def calculate_all_signals_pine(data):
             'rsi_P':sig_det.get('RSI_val',"N/A"),'adx_P':sig_det.get('ADX_val',"N/A"),
             'signals_P':sig_det}
 
+# --- Fonction get_stars_pine (CORRIGÉE) ---
 def get_stars_pine(confluence_value):
-    if confluence_value == 6: return "⭐⭐⭐⭐⭐⭐"; elif confluence_value == 5: return "⭐⭐⭐⭐⭐"; 
-    elif confluence_value == 4: return "⭐⭐⭐⭐"; elif confluence_value == 3: return "⭐⭐⭐"; 
-    elif confluence_value == 2: return "⭐⭐"; elif confluence_value == 1: return "⭐"; else: return "WAIT"
+    if confluence_value == 6: return "⭐⭐⭐⭐⭐⭐"
+    elif confluence_value == 5: return "⭐⭐⭐⭐⭐"
+    elif confluence_value == 4: return "⭐⭐⭐⭐"
+    elif confluence_value == 3: return "⭐⭐⭐"
+    elif confluence_value == 2: return "⭐⭐"
+    elif confluence_value == 1: return "⭐"
+    else: return "WAIT"
 
 # --- Interface Utilisateur (INCHANGÉE) ---
 col1, col2 = st.columns([1, 3])
@@ -289,7 +291,7 @@ with col2:
                     processed_results.append(result_data)
                 else: processed_results.append({'Paire':pair_name_display,'Direction':'ERREUR CALCUL','Conf. (0-6)':0,'Étoiles':'N/A','RSI':'N/A','ADX':'N/A','Bull':0,'Bear':0,'details':{'Info':'Calcul signaux (Alpaca) échoué'}})
             else: processed_results.append({'Paire':pair_name_display,'Direction':'ERREUR DONNÉES','Conf. (0-6)':0,'Étoiles':'N/A','RSI':'N/A','ADX':'N/A','Bull':0,'Bear':0,'details':{'Info':'Données Alpaca non dispo/symb invalide (logs serveur)'}})
-            time.sleep(0.3) # Augmenté le délai pour l'API
+            time.sleep(0.3) 
         progress_bar.empty(); status_text.empty()
         if processed_results:
             df_all = pd.DataFrame(processed_results)
@@ -317,4 +319,3 @@ with st.expander("ℹ️ Comment ça marche (Logique Pine Script avec Données A
     st.markdown("""**6 Signaux Confluence:** HMA(20), RSI(10), ADX(14)>=20, HA(Simple), SHA(10,10), Ichi(9,26,52). 
                 **Comptage & Étoiles:** Pine. **Source:** Alpaca API.""")
 st.caption("Scanner H1 (Alpaca). Multi-TF non actif.")
-   
